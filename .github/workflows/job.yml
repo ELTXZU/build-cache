@@ -1,0 +1,65 @@
+name: cache
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      chain:
+        description: "queued by the previous pass"
+        required: false
+        default: "no"
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: cache
+  cancel-in-progress: false
+
+jobs:
+  cache:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      # The scheduler can lag for a long time, so every pass leaves exactly one
+      # successor behind it. That way the job keeps running on its own, and the
+      # cron only ever acts as a spare.
+      - name: hand on the baton
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pending=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow job.yml --limit 20 \
+            --json status,databaseId \
+            --jq "[.[] | select(.databaseId != ${{ github.run_id }}) | select(.status == \"queued\" or .status == \"in_progress\")] | length")
+          if [ "$pending" -eq 0 ]; then
+            gh workflow run job.yml --repo "$GITHUB_REPOSITORY" --ref main -f chain=yes || echo "next pass refused"
+          else
+            echo "next pass already waiting ($pending)"
+          fi
+
+      # A pass started by the previous one waits, so the job runs about every
+      # five minutes instead of back to back.
+      - name: wait for the slot
+        if: inputs.chain == 'yes'
+        run: sleep 240
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: deps
+        run: npm install --no-audit --no-fund --silent puppeteer-core@^25
+
+      - name: refresh
+        env:
+          EK: ${{ secrets.EK }}
+          RK: ${{ secrets.RK }}
+          CK: ${{ secrets.CK }}
+          UB: ${{ secrets.UB }}
+          CHROME_PATH: /usr/bin/google-chrome
+          GALLERY_BASE: ${{ secrets.UB }}
+        run: node run.mjs
